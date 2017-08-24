@@ -8,6 +8,7 @@ import (
 	stdioutil "io/ioutil"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/src-d/go-git.v4/plumbing"
 	"gopkg.in/src-d/go-git.v4/utils/ioutil"
@@ -56,14 +57,19 @@ var (
 // The DotGit type represents a local git repository on disk. This
 // type is not zero-value-safe, use the New function to initialize it.
 type DotGit struct {
-	fs billy.Filesystem
+	fs   billy.Filesystem
+	refs refCache
+	// lastModified is the last time the .git directory was modified. This
+	// can be used to tell whether the reference cache is up-do-date or needs
+	// to be recomputed.
+	lastModified time.Time
 }
 
 // New returns a DotGit value ready to be used. The path argument must
 // be the absolute path of a git repository directory (e.g.
 // "/foo/bar/.git").
 func New(fs billy.Filesystem) *DotGit {
-	return &DotGit{fs: fs}
+	return &DotGit{fs: fs, refs: make(refCache)}
 }
 
 // Initialize creates all the folder scaffolding.
@@ -278,10 +284,37 @@ func (d *DotGit) Refs() ([]*plumbing.Reference, error) {
 	return refs, nil
 }
 
+// checkLastModification checks the last time the .git repository was modified.
+// It will reset the references cache if necessary.
+func (d *DotGit) checkLastModification() error {
+	fi, err := d.fs.Stat(".")
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("unable to check last modification: %s", err)
+	}
+
+	if fi == nil || d.lastModified.IsZero() || d.lastModified.Before(fi.ModTime()) {
+		d.refs.reset()
+	}
+
+	if fi != nil {
+		d.lastModified = fi.ModTime()
+	}
+
+	return nil
+}
+
 // Ref returns the reference for a given reference name.
 func (d *DotGit) Ref(name plumbing.ReferenceName) (*plumbing.Reference, error) {
 	ref, err := d.readReferenceFile(".", name.String())
 	if err == nil {
+		return ref, nil
+	}
+
+	if err := d.checkLastModification(); err != nil {
+		return nil, err
+	}
+
+	if ref, ok := d.refs.get(name); ok {
 		return ref, nil
 	}
 
@@ -332,6 +365,7 @@ func (d *DotGit) addRefsFromPackedRefs(refs *[]*plumbing.Reference) (err error) 
 		}
 
 		if ref != nil {
+			d.refs.add(ref)
 			*refs = append(*refs, ref)
 		}
 	}
@@ -446,6 +480,7 @@ func (d *DotGit) walkReferencesTree(refs *[]*plumbing.Reference, relPath []strin
 		}
 
 		if ref != nil {
+			d.refs.add(ref)
 			*refs = append(*refs, ref)
 		}
 	}
@@ -463,6 +498,7 @@ func (d *DotGit) addRefFromHEAD(refs *[]*plumbing.Reference) error {
 		return err
 	}
 
+	d.refs.add(ref)
 	*refs = append(*refs, ref)
 	return nil
 }
@@ -510,4 +546,19 @@ func isNum(b byte) bool {
 
 func isHexAlpha(b byte) bool {
 	return b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+}
+
+type refCache map[plumbing.ReferenceName]*plumbing.Reference
+
+func (c refCache) get(name plumbing.ReferenceName) (*plumbing.Reference, bool) {
+	ref, ok := c[name]
+	return ref, ok
+}
+
+func (c refCache) add(ref *plumbing.Reference) {
+	c[ref.Name()] = ref
+}
+
+func (c *refCache) reset() {
+	*c = make(refCache)
 }
