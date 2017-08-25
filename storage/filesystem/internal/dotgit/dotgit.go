@@ -8,7 +8,6 @@ import (
 	stdioutil "io/ioutil"
 	"os"
 	"strings"
-	"time"
 
 	"gopkg.in/src-d/go-git.v4/plumbing"
 	"gopkg.in/src-d/go-git.v4/utils/ioutil"
@@ -59,10 +58,6 @@ var (
 type DotGit struct {
 	fs   billy.Filesystem
 	refs refCache
-	// lastModified is the last time the .git directory was modified. This
-	// can be used to tell whether the reference cache is up-do-date or needs
-	// to be recomputed.
-	lastModified time.Time
 }
 
 // New returns a DotGit value ready to be used. The path argument must
@@ -260,6 +255,7 @@ func (d *DotGit) SetRef(r *plumbing.Reference) error {
 	}
 
 	defer ioutil.CheckClose(f, &err)
+	d.refs.add(r)
 
 	_, err = f.Write([]byte(content))
 	return err
@@ -269,6 +265,13 @@ func (d *DotGit) SetRef(r *plumbing.Reference) error {
 // Symbolic references are resolved and included in the output.
 func (d *DotGit) Refs() ([]*plumbing.Reference, error) {
 	var refs []*plumbing.Reference
+	if len(d.refs) > 0 {
+		for _, r := range d.refs {
+			refs = append(refs, r)
+		}
+		return refs, nil
+	}
+
 	if err := d.addRefsFromPackedRefs(&refs); err != nil {
 		return nil, err
 	}
@@ -284,37 +287,14 @@ func (d *DotGit) Refs() ([]*plumbing.Reference, error) {
 	return refs, nil
 }
 
-// checkLastModification checks the last time the .git repository was modified.
-// It will reset the references cache if necessary.
-func (d *DotGit) checkLastModification() error {
-	fi, err := d.fs.Stat(".")
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("unable to check last modification: %s", err)
-	}
-
-	if fi == nil || d.lastModified.IsZero() || d.lastModified.Before(fi.ModTime()) {
-		d.refs.reset()
-	}
-
-	if fi != nil {
-		d.lastModified = fi.ModTime()
-	}
-
-	return nil
-}
-
 // Ref returns the reference for a given reference name.
 func (d *DotGit) Ref(name plumbing.ReferenceName) (*plumbing.Reference, error) {
-	ref, err := d.readReferenceFile(".", name.String())
-	if err == nil {
+	if ref, ok := d.refs.get(name); ok {
 		return ref, nil
 	}
 
-	if err := d.checkLastModification(); err != nil {
-		return nil, err
-	}
-
-	if ref, ok := d.refs.get(name); ok {
+	ref, err := d.readReferenceFile(".", name.String())
+	if err == nil {
 		return ref, nil
 	}
 
@@ -344,6 +324,7 @@ func (d *DotGit) RemoveRef(name plumbing.ReferenceName) error {
 		return err
 	}
 
+	delete(d.refs, name)
 	return d.rewritePackedRefsWithoutRef(name)
 }
 
@@ -562,3 +543,52 @@ func (c refCache) add(ref *plumbing.Reference) {
 func (c *refCache) reset() {
 	*c = make(refCache)
 }
+
+/*
+type referenceCache struct {
+	packed        refCache
+	packedModTime time.Time
+
+	dir         refCache
+	dirModTimes map[plumbing.ReferenceName]time.Time
+
+	head        *plumbing.Reference
+	headModTime time.Time
+}
+
+func newReferenceCache() *referenceCache {
+	return &referenceCache{
+		packed:      make(refCache),
+		dir:         make(refCache),
+		dirModTimes: make(map[plumbing.ReferenceName]time.Time),
+	}
+}
+
+func (c *referenceCache) get(name plumbing.ReferenceName) (*plumbing.Reference, bool) {
+	if packed is outdated {
+		update packed
+	}
+
+		if ref, ok := c.packed[name]; ok {
+			return ref, true
+		}
+
+	if dir is outdated {
+		update dir
+	}
+
+	if ref, ok := c.dir[name]; ok {
+		return ref, true
+	}
+
+	if head is outdated {
+		update head
+	}
+
+	if c.head.Name() == name {
+		return c.head, true
+	}
+
+	return nil, false
+}
+*/
